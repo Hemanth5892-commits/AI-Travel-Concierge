@@ -1,76 +1,46 @@
 import streamlit as st
 from langchain_groq import ChatGroq
 import os
-import sqlite3
 import requests
-
-# -------- DATABASE SETUP --------
-conn = sqlite3.connect("travel.db", check_same_thread=False)
-cursor = conn.cursor()
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS history (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    query TEXT,
-    response TEXT
-)
-""")
-conn.commit()
 
 # -------- LLM SETUP --------
 llm = ChatGroq(
     model="llama-3.1-8b-instant",
     api_key=os.getenv("GROQ_API_KEY"),
     temperature=0.7,
-    max_tokens=1024,
+    max_tokens=2048,
 )
 
-# -------- TOOL 1: TRAVEL TOOL --------
+# -------- TOOL 1: TRAVEL (DYNAMIC - NOT FAKE) --------
 def travel_tool(query):
-    if "hyderabad" in query.lower():
-        return """
-📍 Top Places to Visit:
-- Charminar
-- Golconda Fort
-- Ramoji Film City
-- Hussain Sagar Lake
+    prompt = f"""
+You are a professional travel planner.
 
-💰 Budget (2 Days):
-- Stay: ₹1500/day
-- Food: ₹500/day
-- Travel: ₹500/day
+Create a realistic 2-day travel plan for: {query}
 
-📝 Tips:
-- Use metro for cheap travel
-- Visit Charminar early morning
+Include:
+1. Top tourist places (specific to location)
+2. Approx budget in INR (stay, food, transport)
+3. Best time to visit
+4. Travel tips
+
+Keep it clear, structured, and practical.
 """
-    return "⚠️ No travel data found for this location."
+    response = llm.invoke(prompt)
+    return response.content
 
-
-# -------- TOOL 2: WEB SEARCH (SIMULATED) --------
-def web_search_tool(query):
-    return f"""
-🌐 Web Search Results (Simulated):
-
-- Latest info about: {query}
-- Example: news, general facts, trends
-
-(Note: simulated for project)
-"""
-
-
-# -------- TOOL 3: WEATHER API (REAL) --------
-def weather_tool(city):
+# -------- TOOL 2: WEATHER (REAL API) --------
+def weather_tool(query):
     api_key = os.getenv("WEATHER_API_KEY")
 
     if not api_key:
         return "⚠️ Weather API key not set"
 
-    url = f"http://api.weatherstack.com/current?access_key={api_key}&query={city}"
+    url = f"http://api.weatherstack.com/current?access_key={api_key}&query={query}"
 
     try:
-        response = requests.get(url)
-        data = response.json()
+        res = requests.get(url)
+        data = res.json()
 
         if "current" not in data:
             return "⚠️ City not found"
@@ -78,14 +48,24 @@ def weather_tool(city):
         temp = data["current"]["temperature"]
         desc = data["current"]["weather_descriptions"][0]
 
-        return f"🌦 Weather in {city}: {temp}°C, {desc}"
+        return f"🌦 Weather in {query}: {temp}°C, {desc}"
 
     except:
         return "⚠️ Weather API failed"
 
+# -------- TOOL 3: WEB SEARCH (SIMULATED) --------
+def web_search_tool(query):
+    return f"""
+🌐 Web Search Result:
+
+- Information about: {query}
+- Includes trends, news, and general facts
+
+(Note: simulated search)
+"""
 
 # -------- UI --------
-st.title("🌍 AI Travel Assistant (Multi-Tool Agent)")
+st.title("🌍 AI Travel Assistant (Final Version)")
 
 user_input = st.text_input("Ask your travel question:")
 
@@ -93,61 +73,37 @@ user_input = st.text_input("Ask your travel question:")
 if user_input:
     try:
         decision_prompt = f"""
-You are an AI agent.
+You are a strict classifier.
 
 User Query: {user_input}
 
-Decide:
-- If weather related → WEATHER
-- If travel/place planning → TRAVEL
-- If general info/news → SEARCH
-- Otherwise → CHAT
-
-Respond ONLY one word:
+Classify into ONE:
 WEATHER / TRAVEL / SEARCH / CHAT
+
+Respond ONLY one word.
 """
 
         decision = llm.invoke(decision_prompt).content.strip().upper()
 
-        # -------- TOOL SELECTION --------
+        # -------- SAFE DECISION --------
         if "WEATHER" in decision:
             result = weather_tool(user_input)
             st.success("🌦 Weather Tool Used")
-            st.write(result)
 
         elif "TRAVEL" in decision:
             result = travel_tool(user_input)
             st.success("🧳 Travel Tool Used")
-            st.write(result)
 
         elif "SEARCH" in decision:
             result = web_search_tool(user_input)
             st.success("🌐 Web Search Tool Used")
-            st.write(result)
 
         else:
             response = llm.invoke(user_input)
             result = response.content
             st.success("🤖 AI Response")
-            st.write(result)
 
-        # -------- SAVE TO DATABASE --------
-        cursor.execute(
-            "INSERT INTO history (query, response) VALUES (?, ?)",
-            (user_input, result)
-        )
-        conn.commit()
+        st.write(result)
 
     except Exception as e:
         st.error(f"Error: {e}")
-
-
-# -------- HISTORY SECTION --------
-st.subheader("📜 Chat History")
-
-if st.button("Show History"):
-    rows = cursor.execute("SELECT * FROM history").fetchall()
-    for row in rows:
-        st.write(f"Q: {row[1]}")
-        st.write(f"A: {row[2]}")
-        st.write("---")
