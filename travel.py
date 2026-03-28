@@ -84,7 +84,7 @@ def web_search_tool(query):
 """
 
 # -------- UI --------
-st.title("🌍 AI Travel Assistant (Final Version)")
+st.title("🌍 AI Travel Assistant")
 
 user_input = st.text_input("Ask your question:")
 
