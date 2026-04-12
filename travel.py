@@ -9,24 +9,71 @@ import re
 import sqlite3
 from datetime import datetime, timedelta
 
-# check if groq api key is there
+# page setup
+st.set_page_config(
+    page_title="AI Travel Assistant",
+    page_icon="🌍",
+    layout="wide"
+)
+
+# i added some css to make it look better
+st.markdown("""
+<style>
+    .user-bubble {
+        background-color: #DCF8C6;
+        padding: 10px 15px;
+        border-radius: 15px 15px 0px 15px;
+        margin: 5px 0;
+        max-width: 70%;
+        float: right;
+        clear: both;
+        color: #000 !important;
+    }
+    .assistant-bubble {
+        background-color: #2a2a2a;
+        padding: 10px 15px;
+        border-radius: 15px 15px 15px 0px;
+        margin: 5px 0;
+        max-width: 70%;
+        float: left;
+        clear: both;
+        color: #f0f0f0 !important;
+    }
+    .result-card {
+        background-color: #1e1e1e;
+        border: 1px solid #333;
+        border-radius: 12px;
+        padding: 16px 20px;
+        margin: 10px 0;
+        color: #f0f0f0 !important;
+    }
+    .result-card b {
+        color: #ffffff !important;
+    }
+    .clearfix { clear: both; }
+    footer { visibility: hidden; }
+</style>
+""", unsafe_allow_html=True)
+
+# check if api key is there otherwise stop
 if not os.getenv("GROQ_API_KEY"):
-    st.error("GROQ API Key is missing!")
+    st.error("GROQ API Key missing please add it in .env file")
     st.stop()
 
-# setup the AI model
+# setup groq model
 llm = ChatGroq(
     model="llama-3.1-8b-instant",
     api_key=os.getenv("GROQ_API_KEY"),
     temperature=0.7,
-    max_tokens=2048,
+    max_tokens=4096,
 )
 
-# database functions
+# database stuff
+# i learned sqlite from youtube it was confusing at first
 def init_db():
-    con = sqlite3.connect("travel_searches.db")
-    cur = con.cursor()
-    cur.execute("""
+    conn = sqlite3.connect("travel_searches.db")
+    c = conn.cursor()
+    c.execute("""
         CREATE TABLE IF NOT EXISTS searches (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             tool TEXT,
@@ -36,56 +83,62 @@ def init_db():
             timestamp TEXT
         )
     """)
-    con.commit()
-    con.close()
+    conn.commit()
+    conn.close()
 
 def save_search(tool, query, city, result):
-    con = sqlite3.connect("travel_searches.db")
-    cur = con.cursor()
-    cur.execute("INSERT INTO searches (tool, query, city, result, timestamp) VALUES (?, ?, ?, ?, ?)",
-                (tool, query, city, result, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-    con.commit()
-    con.close()
+    conn = sqlite3.connect("travel_searches.db")
+    c = conn.cursor()
+    c.execute("INSERT INTO searches (tool, query, city, result, timestamp) VALUES (?, ?, ?, ?, ?)",
+              (tool, query, city, result, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    conn.commit()
+    conn.close()
 
 def get_recent_searches(limit=5):
-    con = sqlite3.connect("travel_searches.db")
-    cur = con.cursor()
-    cur.execute("SELECT tool, query, city, timestamp FROM searches ORDER BY id DESC LIMIT ?", (limit,))
-    data = cur.fetchall()
-    con.close()
+    conn = sqlite3.connect("travel_searches.db")
+    c = conn.cursor()
+    c.execute("SELECT tool, query, city, timestamp FROM searches ORDER BY id DESC LIMIT ?", (limit,))
+    data = c.fetchall()
+    conn.close()
     return data
 
 def clear_searches():
-    con = sqlite3.connect("travel_searches.db")
-    cur = con.cursor()
-    cur.execute("DELETE FROM searches")
-    con.commit()
-    con.close()
+    conn = sqlite3.connect("travel_searches.db")
+    c = conn.cursor()
+    c.execute("DELETE FROM searches")
+    conn.commit()
+    conn.close()
 
 init_db()
 
-# function to get city name from the query
+# this function tries to get the city name from what user typed
 def extract_city(query):
     match = re.search(r"in ([A-Za-z\s]+)", query.lower())
     if match:
         return match.group(1).strip()
+    # if no match just take last word
     return query.strip().split()[-1]
 
-# function to get number of days from the query
+# get number of days from query
 def extract_days(query):
-    match = re.search(r"(\d+)\s*day", query.lower())
+    match = re.search(r"(\d+)\s*-?\s*day", query.lower())
     if match:
-        return int(match.group(1))
-    return 2
+        d = int(match.group(1))
+        if d > 7:
+            d = 7  # cap at 7 days otherwise AI gives too much output
+        return d
+    return 2  # default 2 days
 
-# travel plan tool
+
+# travel planning tool
 def travel_tool(query):
     city = extract_city(query)
     days = extract_days(query)
 
+    # made this prompt myself after trying many times
     prompt = f"""
 You are a professional travel planner.
-Create a realistic {days}-day travel plan for: {city.title()}
+Create a realistic {days}-day travel plan for {city.title()}.
 
 For each day follow this exact format:
 
@@ -111,14 +164,15 @@ At the end include:
         res = llm.invoke(prompt)
         return res.content
     except Exception as e:
-        return f"Error in travel tool: {str(e)}"
+        return f"travel tool error: {str(e)}"
 
-# weather tool
+
+# weather tool - uses weatherstack api
 @st.cache_data
 def weather_tool(query):
     api_key = os.getenv("WEATHER_API_KEY")
     if not api_key:
-        return "Weather API key is missing"
+        return "weather api key not found in .env"
 
     city = extract_city(query)
 
@@ -127,12 +181,12 @@ def weather_tool(query):
         res = requests.get(url, timeout=5)
 
         if res.status_code != 200:
-            return "Weather service is not working right now"
+            return "weather api not working right now"
 
         data = res.json()
 
         if "current" not in data or not data["current"]:
-            return "City name is wrong or not found"
+            return "city not found please check spelling"
 
         temp = data["current"].get("temperature", "N/A")
         desc = data["current"].get("weather_descriptions", ["N/A"])[0]
@@ -140,16 +194,17 @@ def weather_tool(query):
         return f"Weather in {city.title()}: {temp}°C, {desc}"
 
     except requests.exceptions.Timeout:
-        return "Weather API took too long to respond"
+        return "weather api took too long"
     except Exception as e:
-        return f"Weather error: {str(e)}"
+        return f"weather error: {str(e)}"
+
 
 # hotel search tool
+# first tries booking api, if that fails uses AI to suggest hotels
 def hotel_tool(query):
     api_key = os.getenv("RAPIDAPI_KEY")
     city = extract_city(query)
 
-    # first try the real booking API
     if api_key:
         headers = {
             "x-rapidapi-key": api_key,
@@ -157,7 +212,7 @@ def hotel_tool(query):
         }
 
         try:
-            # step 1 - get the destination id
+            # step 1 get destination id
             dest_res = requests.get(
                 "https://booking-com15.p.rapidapi.com/api/v1/hotels/searchDestination",
                 headers=headers,
@@ -166,25 +221,24 @@ def hotel_tool(query):
             )
 
             if dest_res.status_code == 429:
-                raise Exception("quota finished")
+                raise Exception("quota done")
             if dest_res.status_code != 200:
-                raise Exception("api not working")
+                raise Exception("api error")
 
             dest_data = dest_res.json().get("data", [])
             if not dest_data:
-                raise Exception("city not found")
+                raise Exception("city not found in booking api")
 
             dest_id = dest_data[0].get("dest_id")
             dest_type = dest_data[0].get("search_type") or dest_data[0].get("dest_type") or "CITY"
 
             if not dest_id:
-                raise Exception("no destination id")
+                raise Exception("no dest id")
 
-            # step 2 - set checkin and checkout dates
+            # step 2 set dates (tomorrow to day after)
             checkin = (datetime.today() + timedelta(days=1)).strftime("%Y-%m-%d")
             checkout = (datetime.today() + timedelta(days=3)).strftime("%Y-%m-%d")
 
-            # step 3 - search for hotels
             params = {
                 "dest_id": dest_id,
                 "search_type": dest_type,
@@ -198,6 +252,7 @@ def hotel_tool(query):
                 "currency_code": "INR"
             }
 
+            # step 3 search hotels (retry 3 times if timeout)
             hotel_res = None
             for i in range(3):
                 try:
@@ -208,17 +263,19 @@ def hotel_tool(query):
                         timeout=25
                     )
                     if hotel_res.status_code == 429:
-                        raise Exception("quota finished")
+                        raise Exception("quota done")
                     break
                 except requests.exceptions.Timeout:
                     if i == 2:
-                        raise Exception("timeout")
+                        raise Exception("timeout after 3 tries")
 
             if hotel_res is None:
-                raise Exception("no response from hotel api")
+                raise Exception("no response")
 
             hotel_data = hotel_res.json()
             data_block = hotel_data.get("data", {})
+
+            # tried different keys because api response keeps changing
             hotels = (
                 data_block.get("result") or
                 data_block.get("hotels") or
@@ -229,7 +286,6 @@ def hotel_tool(query):
             if not hotels:
                 raise Exception("no hotels in response")
 
-            # format the output
             output = f"🏨 Hotels in {city.title()}:\n\n"
             count = 0
             for h in hotels:
@@ -241,23 +297,27 @@ def hotel_tool(query):
                 name = prop.get("name") or h.get("name") or h.get("hotel_name")
                 rating = prop.get("reviewScore") or h.get("reviewScore") or h.get("review_score")
                 price = prop.get("priceBreakdown", {}).get("grossPrice", {}).get("value") or h.get("min_total_price")
+
                 if not name:
                     continue
                 count += 1
                 output += f"{count}. **{name}**\n"
                 output += f"   ⭐ Rating : {rating if rating else 'N/A'}\n"
-                output += f"   💰 Price  : ₹{int(float(price))}\n" if price else "   💰 Price  : N/A\n"
+                if price:
+                    output += f"   💰 Price  : ₹{int(float(price))}\n"
+                else:
+                    output += f"   💰 Price  : N/A\n"
                 output += "\n"
 
             if count == 0:
-                raise Exception("could not get hotel details")
+                raise Exception("could not parse hotel details")
 
             return output
 
         except Exception:
-            pass  # if api fails, use AI instead
+            pass  # fall through to AI fallback below
 
-    # if API fails use AI to suggest hotels
+    # if api fails or no key, ask AI to suggest hotels
     prompt = f"""
 You are a hotel recommendation expert for Indian cities.
 
@@ -276,9 +336,10 @@ Only suggest real, well-known hotels that actually exist in {city.title()}.
         res = llm.invoke(prompt)
         return f"🏨 Hotels in {city.title()} (AI suggestions):\n\n" + res.content
     except Exception as e:
-        return f"Hotel search error: {str(e)}"
+        return f"hotel tool error: {str(e)}"
 
-# itinerary tool
+
+# itinerary tool - more detailed than travel tool
 def itinerary_tool(query):
     city = extract_city(query)
     days = extract_days(query)
@@ -312,13 +373,15 @@ At the end include:
         res = llm.invoke(prompt)
         return res.content
     except Exception as e:
-        return f"Itinerary error: {str(e)}"
+        return f"itinerary error: {str(e)}"
 
-# simple web search tool (demo)
+
+# basic search tool (just a demo for now)
 def web_search_tool(query):
-    return f"Search results for: {query}\n\n(This is a demo search tool)"
+    return f"Search results for: {query}\n\n(demo search, not connected to real search engine yet)"
 
-# function to decide which tool to use
+
+# decide which tool to use based on keywords in the query
 def decide_tool(query):
     q = query.lower()
     if any(word in q for word in ["weather", "temperature", "climate"]):
@@ -334,80 +397,155 @@ def decide_tool(query):
     else:
         return "chat"
 
+
+# export chat history as text file
+def build_export_text(chat_history):
+    lines = []
+    lines.append("=" * 50)
+    lines.append("   AI TRAVEL ASSISTANT - CHAT EXPORT")
+    lines.append(f"   Exported: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append("=" * 50 + "\n")
+    for msg in chat_history:
+        role = "You" if msg["role"] == "user" else "Assistant"
+        lines.append(f"[{role}]\n{msg['content']}\n")
+        lines.append("-" * 40)
+    return "\n".join(lines)
+
+
+# session state for chat history
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+
 # app title
 st.title("🌍 AI Travel Assistant")
+st.caption("Ask me about hotels, weather, itineraries, or travel plans!")
 
-# sidebar for recent searches
+# sidebar
 with st.sidebar:
-    st.header("Recent Searches")
+    st.header("🕘 Recent Searches")
     recent = get_recent_searches()
     if recent:
         for row in recent:
             tool, query, city, timestamp = row
             st.markdown(f"**{tool.upper()}** — {city or query}")
-            st.caption(f"{timestamp}")
+            st.caption(f"🕒 {timestamp}")
             st.divider()
     else:
         st.info("No searches yet.")
-    if st.button("Clear History"):
-        clear_searches()
-        st.success("Cleared!")
-        st.rerun()
 
-# text input for user question
-user_input = st.text_input("Ask your question:")
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("🗑️ Clear History"):
+            clear_searches()
+            st.success("Cleared!")
+            st.rerun()
+    with col2:
+        if st.button("🧹 Clear Chat"):
+            st.session_state.chat_history = []
+            st.rerun()
 
-if user_input and not user_input.strip():
-    st.warning("Please enter something!")
-    st.stop()
+    st.divider()
+    st.subheader("📥 Export Chat")
+    if st.session_state.chat_history:
+        txt = build_export_text(st.session_state.chat_history)
+        st.download_button(
+            label="⬇️ Download as TXT",
+            data=txt,
+            file_name=f"travel_chat_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+            mime="text/plain",
+            use_container_width=True
+        )
+    else:
+        st.info("No chat to export yet.")
 
-# main logic
-if user_input:
-    try:
-        tool = decide_tool(user_input)
-        city = extract_city(user_input)
+# show chat messages
+chat_container = st.container()
+with chat_container:
+    for msg in st.session_state.chat_history:
+        if msg["role"] == "user":
+            st.markdown(
+                f'<div class="user-bubble">🧑 {msg["content"]}</div>'
+                f'<div class="clearfix"></div>',
+                unsafe_allow_html=True
+            )
+        else:
+            tool = msg.get("tool", "chat")
+            # emoji for each tool type
+            emojis = {
+                "weather": "🌦",
+                "hotel": "🏨",
+                "itinerary": "🗓️",
+                "travel": "🧳",
+                "search": "🌐",
+                "chat": "🤖"
+            }
+            emoji = emojis.get(tool, "🤖")
+            content = msg["content"].replace("\n", "<br>")
+            st.markdown(
+                f'<div class="result-card"><b>{emoji} {tool.upper()}</b><br><br>{content}</div>',
+                unsafe_allow_html=True
+            )
 
-        if tool == "weather":
+# input bar at bottom
+st.divider()
+with st.form(key="chat_form", clear_on_submit=True):
+    col1, col2 = st.columns([5, 1])
+    with col1:
+        user_input = st.text_input(
+            "message",
+            placeholder="e.g. Show hotels in Goa / 3 day itinerary in Manali / Weather in Delhi",
+            label_visibility="collapsed"
+        )
+    with col2:
+        submitted = st.form_submit_button("Send 🚀", use_container_width=True)
+
+# main logic runs when user submits
+if submitted and user_input.strip():
+    st.session_state.chat_history.append({
+        "role": "user",
+        "content": user_input
+    })
+
+    tool_to_use = decide_tool(user_input)
+    city = extract_city(user_input)
+
+    with st.spinner("Thinking..."):
+        if tool_to_use == "weather":
             result = weather_tool(user_input)
-            st.success("🌦 Weather Tool Used")
-            st.write(result)
             save_search("weather", user_input, city, result)
 
-        elif tool == "hotel":
+        elif tool_to_use == "hotel":
             result = hotel_tool(user_input)
-            st.success("🏨 Hotel Tool Used")
-            st.markdown(result)
             save_search("hotel", user_input, city, result)
 
-        elif tool == "itinerary":
-            days = extract_days(user_input)
-            st.success(f"🗓️ Itinerary Tool Used")
-            with st.spinner("Making your itinerary..."):
-                result = itinerary_tool(user_input)
-            st.markdown(result)
+        elif tool_to_use == "itinerary":
+            result = itinerary_tool(user_input)
             save_search("itinerary", user_input, city, result)
 
-        elif tool == "travel":
+        elif tool_to_use == "travel":
             result = travel_tool(user_input)
-            st.success("🧳 Travel Tool Used")
-            st.write(result)
             save_search("travel", user_input, city, result)
 
-        elif tool == "search":
+        elif tool_to_use == "search":
             result = web_search_tool(user_input)
-            st.success("🌐 Search Tool Used")
-            st.write(result)
             save_search("search", user_input, user_input, result)
 
         else:
+            # general chat with the AI
             try:
                 response = llm.invoke(user_input)
                 result = response.content
             except Exception as e:
                 result = f"AI error: {str(e)}"
-            st.success("🤖 AI Response")
-            st.write(result)
             save_search("chat", user_input, None, result)
 
-    except Exception as e:
-        st.error(f"Something went wrong: {str(e)}")
+    st.session_state.chat_history.append({
+        "role": "assistant",
+        "content": result,
+        "tool": tool_to_use
+    })
+
+    st.rerun()
+
+elif submitted and not user_input.strip():
+    st.warning("please type something first!")
