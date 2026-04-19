@@ -7,7 +7,9 @@ import os
 import requests
 import re
 import sqlite3
+import time
 from datetime import datetime, timedelta
+from duckduckgo_search import DDGS
 
 # page setup
 st.set_page_config(
@@ -16,7 +18,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# i added some css to make it look better
+# css styling
 st.markdown("""
 <style>
     .user-bubble {
@@ -68,8 +70,10 @@ llm = ChatGroq(
     max_tokens=4096,
 )
 
-# database stuff
-# i learned sqlite from youtube it was confusing at first
+# ─────────────────────────────────────────────
+# DATABASE
+# ─────────────────────────────────────────────
+
 def init_db():
     conn = sqlite3.connect("travel_searches.db")
     c = conn.cursor()
@@ -89,15 +93,20 @@ def init_db():
 def save_search(tool, query, city, result):
     conn = sqlite3.connect("travel_searches.db")
     c = conn.cursor()
-    c.execute("INSERT INTO searches (tool, query, city, result, timestamp) VALUES (?, ?, ?, ?, ?)",
-              (tool, query, city, result, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    c.execute(
+        "INSERT INTO searches (tool, query, city, result, timestamp) VALUES (?, ?, ?, ?, ?)",
+        (tool, query, city, result, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    )
     conn.commit()
     conn.close()
 
 def get_recent_searches(limit=5):
     conn = sqlite3.connect("travel_searches.db")
     c = conn.cursor()
-    c.execute("SELECT tool, query, city, timestamp FROM searches ORDER BY id DESC LIMIT ?", (limit,))
+    c.execute(
+        "SELECT tool, query, city, timestamp FROM searches ORDER BY id DESC LIMIT ?",
+        (limit,)
+    )
     data = c.fetchall()
     conn.close()
     return data
@@ -111,31 +120,44 @@ def clear_searches():
 
 init_db()
 
-# this function tries to get the city name from what user typed
+# ─────────────────────────────────────────────
+# HELPERS
+# ─────────────────────────────────────────────
+
 def extract_city(query):
     match = re.search(r"in ([A-Za-z\s]+)", query.lower())
     if match:
         return match.group(1).strip()
-    # if no match just take last word
     return query.strip().split()[-1]
 
-# get number of days from query
 def extract_days(query):
     match = re.search(r"(\d+)\s*-?\s*day", query.lower())
     if match:
         d = int(match.group(1))
         if d > 7:
-            d = 7  # cap at 7 days otherwise AI gives too much output
+            d = 7  # cap at 7 days
         return d
-    return 2  # default 2 days
+    return 2  # default
 
+def validate_input(query):
+    """Basic input validation."""
+    query = query.strip()
+    if not query:
+        return False, "Please type something first!"
+    if len(query) < 3:
+        return False, "Query is too short. Please be more specific."
+    if len(query) > 500:
+        return False, "Query is too long. Please keep it under 500 characters."
+    return True, query
 
-# travel planning tool
+# ─────────────────────────────────────────────
+# TOOLS
+# ─────────────────────────────────────────────
+
 def travel_tool(query):
     city = extract_city(query)
     days = extract_days(query)
 
-    # made this prompt myself after trying many times
     prompt = f"""
 You are a professional travel planner.
 Create a realistic {days}-day travel plan for {city.title()}.
@@ -164,15 +186,14 @@ At the end include:
         res = llm.invoke(prompt)
         return res.content
     except Exception as e:
-        return f"travel tool error: {str(e)}"
+        return f"Travel tool error: {str(e)}"
 
 
-# weather tool - uses weatherstack api
 @st.cache_data
 def weather_tool(query):
     api_key = os.getenv("WEATHER_API_KEY")
     if not api_key:
-        return "weather api key not found in .env"
+        return "Weather API key not found in .env"
 
     city = extract_city(query)
 
@@ -181,26 +202,33 @@ def weather_tool(query):
         res = requests.get(url, timeout=5)
 
         if res.status_code != 200:
-            return "weather api not working right now"
+            return "Weather API not working right now."
 
         data = res.json()
 
         if "current" not in data or not data["current"]:
-            return "city not found please check spelling"
+            return f"City '{city}' not found. Please check the spelling."
 
         temp = data["current"].get("temperature", "N/A")
         desc = data["current"].get("weather_descriptions", ["N/A"])[0]
+        feels = data["current"].get("feelslike", "N/A")
+        humidity = data["current"].get("humidity", "N/A")
+        wind = data["current"].get("wind_speed", "N/A")
 
-        return f"Weather in {city.title()}: {temp}°C, {desc}"
+        return (
+            f"🌦 Weather in {city.title()}:\n\n"
+            f"🌡 Temperature : {temp}°C (Feels like {feels}°C)\n"
+            f"☁ Condition   : {desc}\n"
+            f"💧 Humidity    : {humidity}%\n"
+            f"🌬 Wind Speed  : {wind} km/h"
+        )
 
     except requests.exceptions.Timeout:
-        return "weather api took too long"
+        return "Weather API took too long to respond."
     except Exception as e:
-        return f"weather error: {str(e)}"
+        return f"Weather error: {str(e)}"
 
 
-# hotel search tool
-# first tries booking api, if that fails uses AI to suggest hotels
 def hotel_tool(query):
     api_key = os.getenv("RAPIDAPI_KEY")
     city = extract_city(query)
@@ -212,7 +240,6 @@ def hotel_tool(query):
         }
 
         try:
-            # step 1 get destination id
             dest_res = requests.get(
                 "https://booking-com15.p.rapidapi.com/api/v1/hotels/searchDestination",
                 headers=headers,
@@ -235,7 +262,6 @@ def hotel_tool(query):
             if not dest_id:
                 raise Exception("no dest id")
 
-            # step 2 set dates (tomorrow to day after)
             checkin = (datetime.today() + timedelta(days=1)).strftime("%Y-%m-%d")
             checkout = (datetime.today() + timedelta(days=3)).strftime("%Y-%m-%d")
 
@@ -252,7 +278,6 @@ def hotel_tool(query):
                 "currency_code": "INR"
             }
 
-            # step 3 search hotels (retry 3 times if timeout)
             hotel_res = None
             for i in range(3):
                 try:
@@ -275,7 +300,6 @@ def hotel_tool(query):
             hotel_data = hotel_res.json()
             data_block = hotel_data.get("data", {})
 
-            # tried different keys because api response keeps changing
             hotels = (
                 data_block.get("result") or
                 data_block.get("hotels") or
@@ -303,11 +327,7 @@ def hotel_tool(query):
                 count += 1
                 output += f"{count}. **{name}**\n"
                 output += f"   ⭐ Rating : {rating if rating else 'N/A'}\n"
-                if price:
-                    output += f"   💰 Price  : ₹{int(float(price))}\n"
-                else:
-                    output += f"   💰 Price  : N/A\n"
-                output += "\n"
+                output += f"   💰 Price  : {'₹' + str(int(float(price))) if price else 'N/A'}\n\n"
 
             if count == 0:
                 raise Exception("could not parse hotel details")
@@ -315,9 +335,9 @@ def hotel_tool(query):
             return output
 
         except Exception:
-            pass  # fall through to AI fallback below
+            pass  # fall through to AI fallback
 
-    # if api fails or no key, ask AI to suggest hotels
+    # AI fallback
     prompt = f"""
 You are a hotel recommendation expert for Indian cities.
 
@@ -336,10 +356,9 @@ Only suggest real, well-known hotels that actually exist in {city.title()}.
         res = llm.invoke(prompt)
         return f"🏨 Hotels in {city.title()} (AI suggestions):\n\n" + res.content
     except Exception as e:
-        return f"hotel tool error: {str(e)}"
+        return f"Hotel tool error: {str(e)}"
 
 
-# itinerary tool - more detailed than travel tool
 def itinerary_tool(query):
     city = extract_city(query)
     days = extract_days(query)
@@ -373,32 +392,61 @@ At the end include:
         res = llm.invoke(prompt)
         return res.content
     except Exception as e:
-        return f"itinerary error: {str(e)}"
+        return f"Itinerary error: {str(e)}"
 
 
-# basic search tool (just a demo for now)
 def web_search_tool(query):
-    return f"Search results for: {query}\n\n(demo search, not connected to real search engine yet)"
+    """Real web search using DuckDuckGo — no API key required."""
+    try:
+        time.sleep(1)  # small delay to avoid rate limiting
+        results = []
+        with DDGS() as ddgs:
+            for r in ddgs.text(query, max_results=4):
+                results.append(r)
+
+        if not results:
+            return "No results found for your query. Try rephrasing it."
+
+        output = f"🌐 Search Results for: **{query}**\n\n"
+        for i, r in enumerate(results, 1):
+            title = r.get("title", "No title")
+            body  = r.get("body", "No description")
+            href  = r.get("href", "")
+            output += f"{i}. **{title}**\n"
+            output += f"   {body[:200]}...\n"
+            output += f"   🔗 {href}\n\n"
+
+        return output
+
+    except Exception as e:
+        return f"Search error: {str(e)}\n\nTip: Try again in a moment — DuckDuckGo sometimes rate-limits requests."
 
 
-# decide which tool to use based on keywords in the query
+# ─────────────────────────────────────────────
+# TOOL ROUTER
+# ─────────────────────────────────────────────
+
 def decide_tool(query):
     q = query.lower()
-    if any(word in q for word in ["weather", "temperature", "climate"]):
+    if any(word in q for word in ["weather", "temperature", "climate", "forecast"]):
         return "weather"
-    elif any(word in q for word in ["hotel", "stay", "room", "accommodation"]):
+    elif any(word in q for word in ["hotel", "stay", "room", "accommodation", "hostel", "resort"]):
         return "hotel"
-    elif any(word in q for word in ["itinerary", "schedule", "day by day", "daywise"]):
+    elif any(word in q for word in ["itinerary", "schedule", "day by day", "daywise", "day-by-day"]):
         return "itinerary"
-    elif any(word in q for word in ["trip", "plan", "travel", "visit"]):
+    elif any(word in q for word in ["trip", "plan", "travel", "visit", "tour"]):
         return "travel"
-    elif any(word in q for word in ["news", "latest"]):
+    elif any(word in q for word in ["news", "latest", "search", "find", "what is", "who is",
+                                     "when did", "how to", "tell me about", "information on"]):
         return "search"
     else:
         return "chat"
 
 
-# export chat history as text file
+# ─────────────────────────────────────────────
+# EXPORT
+# ─────────────────────────────────────────────
+
 def build_export_text(chat_history):
     lines = []
     lines.append("=" * 50)
@@ -412,13 +460,20 @@ def build_export_text(chat_history):
     return "\n".join(lines)
 
 
-# session state for chat history
+# ─────────────────────────────────────────────
+# SESSION STATE
+# ─────────────────────────────────────────────
+
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
-# app title
+
+# ─────────────────────────────────────────────
+# UI
+# ─────────────────────────────────────────────
+
 st.title("🌍 AI Travel Assistant")
-st.caption("Ask me about hotels, weather, itineraries, or travel plans!")
+st.caption("Ask me about hotels, weather, itineraries, travel plans, or search the web!")
 
 # sidebar
 with st.sidebar:
@@ -458,7 +513,10 @@ with st.sidebar:
     else:
         st.info("No chat to export yet.")
 
-# show chat messages
+    st.divider()
+    st.caption("💡 Try: 'Search what is the Eiffel Tower' or 'latest news about Goa tourism'")
+
+# chat messages
 chat_container = st.container()
 with chat_container:
     for msg in st.session_state.chat_history:
@@ -470,7 +528,6 @@ with chat_container:
             )
         else:
             tool = msg.get("tool", "chat")
-            # emoji for each tool type
             emojis = {
                 "weather": "🌦",
                 "hotel": "🏨",
@@ -486,66 +543,69 @@ with chat_container:
                 unsafe_allow_html=True
             )
 
-# input bar at bottom
+# input bar
 st.divider()
 with st.form(key="chat_form", clear_on_submit=True):
     col1, col2 = st.columns([5, 1])
     with col1:
         user_input = st.text_input(
             "message",
-            placeholder="e.g. Show hotels in Goa / 3 day itinerary in Manali / Weather in Delhi",
+            placeholder="e.g. Hotels in Goa / 3 day itinerary in Manali / Search what is Taj Mahal",
             label_visibility="collapsed"
         )
     with col2:
         submitted = st.form_submit_button("Send 🚀", use_container_width=True)
 
-# main logic runs when user submits
-if submitted and user_input.strip():
-    st.session_state.chat_history.append({
-        "role": "user",
-        "content": user_input
-    })
+# main logic
+if submitted:
+    valid, result_or_error = validate_input(user_input)
 
-    tool_to_use = decide_tool(user_input)
-    city = extract_city(user_input)
+    if not valid:
+        st.warning(result_or_error)
+    else:
+        clean_input = result_or_error
 
-    with st.spinner("Thinking..."):
-        if tool_to_use == "weather":
-            result = weather_tool(user_input)
-            save_search("weather", user_input, city, result)
+        st.session_state.chat_history.append({
+            "role": "user",
+            "content": clean_input
+        })
 
-        elif tool_to_use == "hotel":
-            result = hotel_tool(user_input)
-            save_search("hotel", user_input, city, result)
+        tool_to_use = decide_tool(clean_input)
+        city = extract_city(clean_input)
 
-        elif tool_to_use == "itinerary":
-            result = itinerary_tool(user_input)
-            save_search("itinerary", user_input, city, result)
+        with st.spinner("Thinking..."):
+            if tool_to_use == "weather":
+                result = weather_tool(clean_input)
+                save_search("weather", clean_input, city, result)
 
-        elif tool_to_use == "travel":
-            result = travel_tool(user_input)
-            save_search("travel", user_input, city, result)
+            elif tool_to_use == "hotel":
+                result = hotel_tool(clean_input)
+                save_search("hotel", clean_input, city, result)
 
-        elif tool_to_use == "search":
-            result = web_search_tool(user_input)
-            save_search("search", user_input, user_input, result)
+            elif tool_to_use == "itinerary":
+                result = itinerary_tool(clean_input)
+                save_search("itinerary", clean_input, city, result)
 
-        else:
-            # general chat with the AI
-            try:
-                response = llm.invoke(user_input)
-                result = response.content
-            except Exception as e:
-                result = f"AI error: {str(e)}"
-            save_search("chat", user_input, None, result)
+            elif tool_to_use == "travel":
+                result = travel_tool(clean_input)
+                save_search("travel", clean_input, city, result)
 
-    st.session_state.chat_history.append({
-        "role": "assistant",
-        "content": result,
-        "tool": tool_to_use
-    })
+            elif tool_to_use == "search":
+                result = web_search_tool(clean_input)
+                save_search("search", clean_input, clean_input, result)
 
-    st.rerun()
+            else:
+                try:
+                    response = llm.invoke(clean_input)
+                    result = response.content
+                except Exception as e:
+                    result = f"AI error: {str(e)}"
+                save_search("chat", clean_input, None, result)
 
-elif submitted and not user_input.strip():
-    st.warning("please type something first!")
+        st.session_state.chat_history.append({
+            "role": "assistant",
+            "content": result,
+            "tool": tool_to_use
+        })
+
+        st.rerun()
