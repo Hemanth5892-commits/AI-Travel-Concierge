@@ -1,9 +1,14 @@
-from dotenv import load_dotenv
-load_dotenv()
+import os
+
+# Only load dotenv locally (not on Render)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 import streamlit as st
 from langchain_groq import ChatGroq
-import os
 import requests
 import re
 import sqlite3
@@ -59,7 +64,7 @@ st.markdown("""
 
 # check if api key is there otherwise stop
 if not os.getenv("GROQ_API_KEY"):
-    st.error("GROQ API Key missing please add it in .env file")
+    st.error("GROQ API Key missing. Please add it in Render Environment Variables.")
     st.stop()
 
 # setup groq model
@@ -72,10 +77,19 @@ llm = ChatGroq(
 
 # ─────────────────────────────────────────────
 # DATABASE
+# Uses /tmp on Render (Linux), local folder on Windows
 # ─────────────────────────────────────────────
 
+import tempfile
+import platform
+
+if platform.system() == "Windows":
+    DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "travel_searches.db")
+else:
+    DB_PATH = "/tmp/travel_searches.db"
+
 def init_db():
-    conn = sqlite3.connect("travel_searches.db")
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("""
         CREATE TABLE IF NOT EXISTS searches (
@@ -91,7 +105,7 @@ def init_db():
     conn.close()
 
 def save_search(tool, query, city, result):
-    conn = sqlite3.connect("travel_searches.db")
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute(
         "INSERT INTO searches (tool, query, city, result, timestamp) VALUES (?, ?, ?, ?, ?)",
@@ -101,7 +115,7 @@ def save_search(tool, query, city, result):
     conn.close()
 
 def get_recent_searches(limit=5):
-    conn = sqlite3.connect("travel_searches.db")
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute(
         "SELECT tool, query, city, timestamp FROM searches ORDER BY id DESC LIMIT ?",
@@ -112,7 +126,7 @@ def get_recent_searches(limit=5):
     return data
 
 def clear_searches():
-    conn = sqlite3.connect("travel_searches.db")
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("DELETE FROM searches")
     conn.commit()
@@ -193,7 +207,7 @@ At the end include:
 def weather_tool(query):
     api_key = os.getenv("WEATHER_API_KEY")
     if not api_key:
-        return "Weather API key not found in .env"
+        return "Weather API key not found. Please add WEATHER_API_KEY in Render Environment Variables."
 
     city = extract_city(query)
 

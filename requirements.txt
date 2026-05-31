@@ -1,13 +1,5 @@
 streamlit
-langchain
-langchain-core
 langchain-groq
-langchain-community
-groq
-langgraph
-langchainhub
-pydantic
 requests
+duckduckgo-search
 python-dotenv
-httpx
-tavily-python
